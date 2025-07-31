@@ -2,7 +2,7 @@
 
 set -e
 
-BACKUP_DIR="/backup/zabbix/latest"
+BACKUP_DIR="/backup/zabbix"
 BACKUP_PATH="$BACKUP_DIR/zabbix_backup.tar.gz"
 TEMP_DIR=$(mktemp -d)
 MYSQL_CNF="/root/.my.cnf"
