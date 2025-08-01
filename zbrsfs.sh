@@ -4,7 +4,8 @@ set -e
 
 BACKUP_DIR="/backup/zabbix"
 BACKUP_PATH="$BACKUP_DIR/zabbix_backup.tar.gz"
-TEMP_DIR=$(mktemp -d)
+#TEMP_DIR=$(mktemp -d)
+TEMP_DIR="$BACKUP_DIR/temp"
 MYSQL_CNF="/root/.my.cnf"
 
 # Проверка и установка зависимостей
@@ -22,21 +23,6 @@ check_dependencies() {
         dnf install -y ${missing[@]}
     fi
 }
-
-# Проверка прав пользователя
-if [ "$(id -u)" -ne 0 ]; then
-    echo "Ошибка: скрипт требует запуска с правами root (sudo)"
-    exit 1
-fi
-
-# Проверка параметров
-if [ $# -ne 1 ]; then
-    echo "Использование: $0 [backup|restore]"
-    exit 1
-fi
-
-# Проверяем зависимости перед выполнением
-check_dependencies
 
 # Проверка root-доступа к MySQL
 check_mysql_root_access() {
@@ -78,56 +64,75 @@ EOF
 
 # Функция резервного копирования
 perform_backup() {
+    local custom_backup_path="$1"
     echo "[$(date +'%F %T')] Запуск процедуры бэкапа"
 
     # Проверка root-доступа к MySQL и создание .my.cnf при необходимости
     check_mysql_root_access
 
     mkdir -p "$BACKUP_DIR"
+    mkdir -p "$TEMP_DIR"
     systemctl stop zabbix-server zabbix-agent
-    
+
     # Получение параметров БД
     db_user=$(grep -oP '^DBUser=\K\S+' /etc/zabbix/zabbix_server.conf)
     db_password=$(grep -oP '^DBPassword=\K\S+' /etc/zabbix/zabbix_server.conf)
     db_name=$(grep -oP '^DBName=\K\S+' /etc/zabbix/zabbix_server.conf)
-    
+
+    # Формируем имя файла бэкапа с датой и временем или используем custom путь
+    if [ -n "$custom_backup_path" ]; then
+        BACKUP_PATH="$custom_backup_path"
+    else
+        BACKUP_FILENAME="zabbix_backup_$(date +'%d-%m-%Y_%H-%M').tar.gz"
+        BACKUP_PATH="$BACKUP_DIR/$BACKUP_FILENAME"
+    fi
+
     # Создание дампа БД
     echo "[$(date +'%F %T')] Создание дампа базы данных..."
     mysqldump --defaults-extra-file="$MYSQL_CNF" --single-transaction --no-tablespaces "$db_name" > "$TEMP_DIR/zabbix_db.sql"
-    
+
     # Копирование конфигураций
     echo "[$(date +'%F %T')] Копирование конфигурационных файлов..."
     cp -a /etc/zabbix "$TEMP_DIR/conf_etc_zabbix"
     cp -a /etc/nginx/conf.d/zabbix.conf "$TEMP_DIR/nginx_zabbix.conf" 2>/dev/null || :
     cp -a /etc/php-fpm.d/zabbix.conf "$TEMP_DIR/php-fpm_zabbix.conf" 2>/dev/null || :
-    
+
     # Создание архива
     echo "[$(date +'%F %T')] Упаковка архива..."
     tar -czf "$BACKUP_PATH" -C "$TEMP_DIR" .
-    
+
     systemctl start zabbix-server zabbix-agent
     echo "[$(date +'%F %T')] Бэкап успешно создан: $BACKUP_PATH"
     rm -rf "$TEMP_DIR"
+
+    # Создание/обновление симлинка на последний бэкап только если не custom путь
+    if [ -z "$custom_backup_path" ]; then
+        ln -sf "$(basename "$BACKUP_PATH")" "$BACKUP_DIR/latest"
+    fi
 }
 
 # Функция восстановления с использованием root-доступа
 perform_restore() {
+    local restore_path="$1"
+
     echo "[$(date +'%F %T')] Запуск процедуры восстановления"
     
+    mkdir -p "$TEMP_DIR"
+
     # Проверка root-доступа к MySQL
     check_mysql_root_access
-    
-    if [ ! -f "$BACKUP_PATH" ]; then
-        echo "ОШИБКА: Файл бэкапа не найден: $BACKUP_PATH"
-        echo "Проверьте путь: $BACKUP_DIR"
+
+    if [ ! -f "$restore_path" ]; then
+        echo "ОШИБКА: Файл бэкапа не найден: $restore_path"
+        echo "Проверьте путь: $restore_path"
         exit 1
     fi
-    
+
     systemctl stop zabbix-server zabbix-agent nginx
-    
+
     # Распаковка архива
     echo "[$(date +'%F %T')] Распаковка архива..."
-    tar -xzf "$BACKUP_PATH" -C "$TEMP_DIR"
+    tar -xzf "$restore_path" -C "$TEMP_DIR"
     
     # Получение параметров БД
     db_user=$(grep -oP '^DBUser=\K\S+' /etc/zabbix/zabbix_server.conf)
@@ -170,17 +175,43 @@ perform_restore() {
     rm -rf "$TEMP_DIR"
 }
 
+# Проверка прав пользователя
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Ошибка: скрипт требует запуска с правами root (sudo)"
+    exit 1
+fi
+
+# Проверка параметров
+if [ $# -lt 1 ]; then
+    echo "Использование: $0 [backup|restore] [--backup=/path/to/backup.tar.gz]"
+    exit 1
+fi
+
+# Проверяем зависимости перед выполнением
+check_dependencies
+
 # Выбор операции
 case "$1" in
     backup)
-        perform_backup
+        # Если указан параметр --backup=...
+        if [[ "$2" =~ ^--backup= ]]; then
+            perform_backup "${2#--backup=}"
+        else
+            perform_backup
+        fi
         ;;
     restore)
-        perform_restore
+        # По умолчанию используем симлинк latest
+        RESTORE_BACKUP="$BACKUP_DIR/latest"
+        # Если указан параметр --backup=...
+        if [[ "$2" =~ ^--backup= ]]; then
+            RESTORE_BACKUP="${2#--backup=}"
+        fi
+        perform_restore "$RESTORE_BACKUP"
         ;;
     *)
         echo "Неизвестная команда: $1"
-        echo "Допустимые команды: backup, restore"
+        echo "Допустимые команды: backup [--backup=/path/to/backup.tar.gz], restore [--backup=/path/to/backup.tar.gz]"
         exit 1
         ;;
 esac
