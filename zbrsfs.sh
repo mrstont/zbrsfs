@@ -45,33 +45,44 @@ check_mysql_root_access() {
         echo -n "Введите пароль root для MySQL: "
         IFS= read -rs mysql_root_password
         echo
-        
-        # Создаем временный файл конфигурации
+
         MYSQL_CNF_TMP=$(mktemp)
         cat > "$MYSQL_CNF_TMP" <<EOF
 [client]
 user=root
-password='$mysql_root_password'
+password=$mysql_root_password
 EOF
-        
-        # Проверка введенного пароля
+
         if ! mysql --defaults-extra-file="$MYSQL_CNF_TMP" -e "SHOW DATABASES" &>/dev/null; then
             echo "ОШИБКА: Неверный пароль root для MySQL"
             rm -f "$MYSQL_CNF_TMP"
             exit 1
         fi
-        
-        echo -e "\n[client]\nuser=root\npassword='$mysql_root_password'" | tee "$MYSQL_CNF" >/dev/null
+
+        cp "$MYSQL_CNF_TMP" "$MYSQL_CNF"
         chmod 600 "$MYSQL_CNF"
         rm -f "$MYSQL_CNF_TMP"
         echo "Файл конфигурации MySQL создан: $MYSQL_CNF"
+    else
+        # root-доступ есть без пароля, но файл может отсутствовать
+        if [ ! -f "$MYSQL_CNF" ]; then
+            cat > "$MYSQL_CNF" <<EOF
+[client]
+user=root
+EOF
+            chmod 600 "$MYSQL_CNF"
+            echo "Файл конфигурации MySQL создан без пароля: $MYSQL_CNF"
+        fi
     fi
 }
 
 # Функция резервного копирования
 perform_backup() {
     echo "[$(date +'%F %T')] Запуск процедуры бэкапа"
-    
+
+    # Проверка root-доступа к MySQL и создание .my.cnf при необходимости
+    check_mysql_root_access
+
     mkdir -p "$BACKUP_DIR"
     systemctl stop zabbix-server zabbix-agent
     
@@ -82,7 +93,7 @@ perform_backup() {
     
     # Создание дампа БД
     echo "[$(date +'%F %T')] Создание дампа базы данных..."
-    mysqldump --single-transaction --no-tablespaces -u"$db_user" -p"$db_password" "$db_name" > "$TEMP_DIR/zabbix_db.sql"
+    mysqldump --defaults-extra-file="$MYSQL_CNF" --single-transaction --no-tablespaces "$db_name" > "$TEMP_DIR/zabbix_db.sql"
     
     # Копирование конфигураций
     echo "[$(date +'%F %T')] Копирование конфигурационных файлов..."
@@ -125,19 +136,19 @@ perform_restore() {
     
     # Пересоздание базы данных
     echo "[$(date +'%F %T')] Пересоздание базы данных..."
-    mysql -e "DROP DATABASE IF EXISTS \`$db_name\`;"
-    mysql -e "CREATE DATABASE \`$db_name\` CHARACTER SET utf8 COLLATE utf8_bin;"
+    mysql --defaults-extra-file="$MYSQL_CNF" -e "DROP DATABASE IF EXISTS \`$db_name\`;"
+    mysql --defaults-extra-file="$MYSQL_CNF" -e "CREATE DATABASE \`$db_name\` CHARACTER SET utf8 COLLATE utf8_bin;"
     
     # Настройка пользователя Zabbix
     echo "[$(date +'%F %T')] Настройка пользователя Zabbix..."
-    mysql -e "DROP USER IF EXISTS '$db_user'@'localhost';"
-    mysql -e "CREATE USER '$db_user'@'localhost' IDENTIFIED BY '$db_password';"
-    mysql -e "GRANT ALL PRIVILEGES ON \`$db_name\`.* TO '$db_user'@'localhost';"
-    mysql -e "FLUSH PRIVILEGES;"
+    mysql --defaults-extra-file="$MYSQL_CNF" -e "DROP USER IF EXISTS '$db_user'@'localhost';"
+    mysql --defaults-extra-file="$MYSQL_CNF" -e "CREATE USER '$db_user'@'localhost' IDENTIFIED BY '$db_password';"
+    mysql --defaults-extra-file="$MYSQL_CNF" -e "GRANT ALL PRIVILEGES ON \`$db_name\`.* TO '$db_user'@'localhost';"
+    mysql --defaults-extra-file="$MYSQL_CNF" -e "FLUSH PRIVILEGES;"
     
     # Восстановление данных
     echo "[$(date +'%F %T')] Восстановление базы данных..."
-    mysql "$db_name" < "$TEMP_DIR/zabbix_db.sql"
+    mysql --defaults-extra-file="$MYSQL_CNF" "$db_name" < "$TEMP_DIR/zabbix_db.sql"
     
     # Восстановление конфигов
     echo "[$(date +'%F %T')] Восстановление конфигураций..."
