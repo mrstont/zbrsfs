@@ -3,8 +3,6 @@
 set -e
 
 BACKUP_DIR="/backup/zabbix"
-BACKUP_PATH="$BACKUP_DIR/zabbix_backup.tar.gz"
-#TEMP_DIR=$(mktemp -d)
 TEMP_DIR="$BACKUP_DIR/temp"
 MYSQL_CNF="/root/.my.cnf"
 
@@ -158,6 +156,7 @@ perform_restore() {
     # Восстановление конфигов
     echo "[$(date +'%F %T')] Восстановление конфигураций..."
     rm -rf /etc/zabbix/*
+    rm -rf /etc/zabbix/.[!.]*
     cp -a "$TEMP_DIR/conf_etc_zabbix"/* /etc/zabbix/
     
     if [ -f "$TEMP_DIR/nginx_zabbix.conf" ]; then
@@ -215,3 +214,5 @@ case "$1" in
         exit 1
         ;;
 esac
+
+trap 'rm -rf "$TEMP_DIR"' EXIT
